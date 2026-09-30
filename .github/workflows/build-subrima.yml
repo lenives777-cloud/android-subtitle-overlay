@@ -3,16 +3,28 @@ name: SUBRIMA Android Build
 on:
   workflow_dispatch:
   push:
-    branches: [ main ]
+    branches:
+      - main
+
+permissions:
+  contents: read
 
 jobs:
   build:
+    name: Build SUBRIMA APK
     runs-on: ubuntu-latest
 
     steps:
+
+      # ---------------------------------------------------------
+      # 1. Получаем исходный код
+      # ---------------------------------------------------------
       - name: Checkout
         uses: actions/checkout@v4
 
+      # ---------------------------------------------------------
+      # 2. Java 17
+      # ---------------------------------------------------------
       - name: Set up Java
         uses: actions/setup-java@v4
         with:
@@ -20,24 +32,130 @@ jobs:
           java-version: '17'
           cache: gradle
 
-      - name: Check Android environment
+      # ---------------------------------------------------------
+      # 3. Проверяем окружение
+      # ---------------------------------------------------------
+      - name: Check environment
         run: |
+          echo "========================================"
+          echo "JAVA"
+          echo "========================================"
+          java -version
+
+          echo ""
+          echo "========================================"
+          echo "ANDROID"
+          echo "========================================"
           echo "ANDROID_HOME=$ANDROID_HOME"
           echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
-          java -version
-          adb version || true
+
+          echo ""
+          echo "========================================"
+          echo "ANDROID SDK"
+          echo "========================================"
           ls -la "$ANDROID_HOME" || true
 
+          echo ""
+          echo "========================================"
+          echo "PROJECT"
+          echo "========================================"
+          ls -la
+          echo ""
+          ls -la SubtitlesAppSubrimaProject
+
+      # ---------------------------------------------------------
+      # 4. Проверяем Gradle Wrapper
+      # ---------------------------------------------------------
+      - name: Check Gradle Wrapper
+        working-directory: ./SubtitlesAppSubrimaProject
+        run: |
+          echo "========================================"
+          echo "GRADLE WRAPPER"
+          echo "========================================"
+
+          ls -la
+
+          echo ""
+          echo "gradlew:"
+          ls -la ./gradlew
+
+          echo ""
+          echo "gradlew.bat:"
+          ls -la ./gradlew.bat
+
+          echo ""
+          echo "gradle directory:"
+          ls -la ./gradle || true
+
+          echo ""
+          echo "wrapper directory:"
+          ls -la ./gradle/wrapper || true
+
+      # ---------------------------------------------------------
+      # 5. Делаем gradlew исполняемым
+      # ---------------------------------------------------------
       - name: Make Gradle executable
-        run: chmod +x ./gradlew
+        run: |
+          chmod +x ./SubtitlesAppSubrimaProject/gradlew
+          ls -la ./SubtitlesAppSubrimaProject/gradlew
 
+      # ---------------------------------------------------------
+      # 6. Настраиваем Gradle
+      # ---------------------------------------------------------
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-disabled: false
+
+      # ---------------------------------------------------------
+      # 7. Проверяем версию Gradle
+      # ---------------------------------------------------------
+      - name: Check Gradle version
+        working-directory: ./SubtitlesAppSubrimaProject
+        run: |
+          ./gradlew --version
+
+      # ---------------------------------------------------------
+      # 8. Показываем Android SDK packages
+      # ---------------------------------------------------------
+      - name: Check Android SDK packages
+        run: |
+          echo "Installed Android SDK packages:"
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --list_installed || true
+
+      # ---------------------------------------------------------
+      # 9. Собираем SUBRIMA DEBUG APK
+      # ---------------------------------------------------------
       - name: Build SUBRIMA debug APK
-        run: ./gradlew clean assembleDebug --stacktrace --no-daemon --console=plain
+        working-directory: ./SubtitlesAppSubrimaProject
+        run: |
+          ./gradlew clean assembleDebug \
+            --stacktrace \
+            --no-daemon \
+            --console=plain
 
+      # ---------------------------------------------------------
+      # 10. Показываем созданные APK
+      # ---------------------------------------------------------
+      - name: Find APK
+        run: |
+          echo "========================================"
+          echo "APK FILES"
+          echo "========================================"
+
+          find ./SubtitlesAppSubrimaProject \
+            -type f \
+            -name "*.apk" \
+            -print
+
+      # ---------------------------------------------------------
+      # 11. Загружаем APK в GitHub Actions
+      # ---------------------------------------------------------
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: SUBRIMA-debug
           path: |
-            **/build/outputs/apk/debug/*.apk
+            SubtitlesAppSubrimaProject/**/build/outputs/apk/debug/*.apk
           if-no-files-found: error
+          retention-days: 30
