@@ -11,8 +11,8 @@ import android.media.AudioAttributes;
 import android.media.AudioFormat;
 import android.media.AudioPlaybackCaptureConfiguration;
 import android.media.AudioRecord;
-import android.media.MediaRecorder;
 import android.media.projection.MediaProjection;
+import android.media.projection.MediaProjectionManager;
 import android.os.Build;
 import android.os.IBinder;
 import android.provider.Settings;
@@ -23,11 +23,14 @@ import android.widget.TextView;
 import androidx.annotation.Nullable;
 import androidx.core.app.NotificationCompat;
 
+import com.example.subtitles.gpt.GptLiveClient;
+
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 public class LiveTranslatorService extends Service {
 
@@ -40,12 +43,35 @@ public class LiveTranslatorService extends Service {
     private static final int AUDIO_ENCODING =
             AudioFormat.ENCODING_PCM_16BIT;
 
+    /*
+     * Пока API-ключ не храним непосредственно в коде.
+     *
+     * Следующим шагом подключим безопасное получение ключа
+     * через настройки приложения.
+     */
+    private static final String OPENAI_API_KEY = "";
+
     private MediaProjection mediaProjection;
     private AudioRecord audioRecord;
 
     private volatile boolean running = false;
 
-    private ExecutorService executor;
+    /*
+     * ВАЖНО:
+     *
+     * Захват аудио и обработка аудио работают
+     * в разных потоках.
+     */
+    private ExecutorService captureExecutor;
+    private ExecutorService processingExecutor;
+
+    /*
+     * Не допускаем одновременную обработку нескольких
+     * аудиофрагментов.
+     */
+    private final AtomicBoolean processing = new AtomicBoolean(false);
+
+    private GptLiveClient gptClient;
 
     private WindowManager windowManager;
     private TextView overlayText;
@@ -56,7 +82,16 @@ public class LiveTranslatorService extends Service {
 
         createNotificationChannel();
 
-        executor = Executors.newSingleThreadExecutor();
+        captureExecutor =
+                Executors.newSingleThreadExecutor();
+
+        processingExecutor =
+                Executors.newSingleThreadExecutor();
+
+        if (!OPENAI_API_KEY.trim().isEmpty()) {
+            gptClient =
+                    new GptLiveClient(OPENAI_API_KEY);
+        }
 
         startForeground(
                 NOTIFICATION_ID,
@@ -99,6 +134,7 @@ public class LiveTranslatorService extends Service {
         }
 
         if (projectionData == null) {
+            showOverlay("SUBRIMA\nОшибка MediaProjection");
             stopSelf();
             return START_NOT_STICKY;
         }
@@ -121,13 +157,14 @@ public class LiveTranslatorService extends Service {
 
         try {
 
-            android.media.projection.MediaProjectionManager manager =
-                    (android.media.projection.MediaProjectionManager)
+            MediaProjectionManager manager =
+                    (MediaProjectionManager)
                             getSystemService(
                                     Context.MEDIA_PROJECTION_SERVICE
                             );
 
             if (manager == null) {
+                showOverlay("SUBRIMA\nMediaProjection ERROR");
                 stopSelf();
                 return;
             }
@@ -139,12 +176,17 @@ public class LiveTranslatorService extends Service {
                     );
 
             if (mediaProjection == null) {
+                showOverlay("SUBRIMA\nProjection ERROR");
                 stopSelf();
                 return;
             }
 
             if (Build.VERSION.SDK_INT <
                     Build.VERSION_CODES.Q) {
+
+                showOverlay(
+                        "SUBRIMA\nAndroid 10+ required"
+                );
 
                 stopSelf();
                 return;
@@ -181,20 +223,34 @@ public class LiveTranslatorService extends Service {
 
             AudioFormat format =
                     new AudioFormat.Builder()
-                            .setEncoding(AUDIO_ENCODING)
-                            .setSampleRate(SAMPLE_RATE)
-                            .setChannelMask(CHANNEL_CONFIG)
+                            .setEncoding(
+                                    AUDIO_ENCODING
+                            )
+                            .setSampleRate(
+                                    SAMPLE_RATE
+                            )
+                            .setChannelMask(
+                                    CHANNEL_CONFIG
+                            )
                             .build();
 
             audioRecord =
                     new AudioRecord.Builder()
                             .setAudioFormat(format)
-                            .setBufferSizeInBytes(bufferSize)
-                            .setAudioPlaybackCaptureConfig(config)
+                            .setBufferSizeInBytes(
+                                    bufferSize
+                            )
+                            .setAudioPlaybackCaptureConfig(
+                                    config
+                            )
                             .build();
 
             if (audioRecord.getState() !=
                     AudioRecord.STATE_INITIALIZED) {
+
+                showOverlay(
+                        "SUBRIMA\nAudioRecord ERROR"
+                );
 
                 stopSelf();
                 return;
@@ -202,15 +258,22 @@ public class LiveTranslatorService extends Service {
 
             running = true;
 
-            showOverlay("SUBRIMA\n● LIVE");
+            showOverlay(
+                    "SUBRIMA\n● LIVE\nЗахват: ON"
+            );
 
-            executor.execute(
+            captureExecutor.execute(
                     this::captureLoop
             );
 
         } catch (Exception e) {
 
             e.printStackTrace();
+
+            showOverlay(
+                    "SUBRIMA\nОшибка запуска"
+            );
+
             stopSelf();
         }
     }
@@ -253,6 +316,9 @@ public class LiveTranslatorService extends Service {
                         System.currentTimeMillis()
                                 - chunkStart;
 
+                /*
+                 * Примерно 2.2 секунды аудио.
+                 */
                 if (elapsed >= 2200) {
 
                     byte[] pcm =
@@ -267,7 +333,6 @@ public class LiveTranslatorService extends Service {
                             createWavFile(pcm);
 
                     if (wavFile != null) {
-
                         processAudio(wavFile);
                     }
                 }
@@ -280,9 +345,11 @@ public class LiveTranslatorService extends Service {
         } finally {
 
             try {
+
                 if (audioRecord != null) {
                     audioRecord.stop();
                 }
+
             } catch (Exception ignored) {
             }
         }
@@ -313,32 +380,62 @@ public class LiveTranslatorService extends Service {
                     dataLength + 36;
 
             out.write(new byte[]{
-                    'R','I','F','F'
+                    'R', 'I', 'F', 'F'
             });
 
-            writeInt(out, totalLength);
+            writeInt(
+                    out,
+                    totalLength
+            );
 
             out.write(new byte[]{
-                    'W','A','V','E'
+                    'W', 'A', 'V', 'E'
             });
 
             out.write(new byte[]{
-                    'f','m','t',' '
+                    'f', 'm', 't', ' '
             });
 
             writeInt(out, 16);
-            writeShort(out, (short) 1);
-            writeShort(out, (short) 1);
-            writeInt(out, SAMPLE_RATE);
-            writeInt(out, byteRate);
-            writeShort(out, (short) 2);
-            writeShort(out, (short) 16);
+
+            writeShort(
+                    out,
+                    (short) 1
+            );
+
+            writeShort(
+                    out,
+                    (short) 1
+            );
+
+            writeInt(
+                    out,
+                    SAMPLE_RATE
+            );
+
+            writeInt(
+                    out,
+                    byteRate
+            );
+
+            writeShort(
+                    out,
+                    (short) 2
+            );
+
+            writeShort(
+                    out,
+                    (short) 16
+            );
 
             out.write(new byte[]{
-                    'd','a','t','a'
+                    'd', 'a', 't', 'a'
             });
 
-            writeInt(out, dataLength);
+            writeInt(
+                    out,
+                    dataLength
+            );
 
             out.write(pcm);
 
@@ -350,6 +447,7 @@ public class LiveTranslatorService extends Service {
         } catch (Exception e) {
 
             e.printStackTrace();
+
             return null;
         }
     }
@@ -372,36 +470,157 @@ public class LiveTranslatorService extends Service {
         out.write((value >> 8) & 0xff);
     }
 
-    private void processAudio(File wavFile) {
+    private void processAudio(
+            File wavFile) {
 
-        executor.execute(() -> {
+        /*
+         * Если предыдущий фрагмент ещё обрабатывается,
+         * этот фрагмент пропускаем.
+         *
+         * Это предотвращает накопление огромной очереди
+         * при медленном интернете/API.
+         */
+        if (!processing.compareAndSet(
+                false,
+                true)) {
+
+            deleteFile(wavFile);
+
+            return;
+        }
+
+        processingExecutor.execute(() -> {
 
             try {
 
-                /*
-                 * Следующий этап:
-                 *
-                 * WAV →
-                 * OpenAI Speech-to-Text →
-                 * GPT Translation →
-                 * Russian TTS
-                 *
-                 * Пока файл только принимается
-                 * и готовится для API.
-                 */
+                if (gptClient == null) {
 
-                if (wavFile.exists()) {
-                    wavFile.delete();
+                    updateOverlay(
+                            "SUBRIMA\n● LIVE\n" +
+                                    "Аудио: ON\n" +
+                                    "OpenAI: API KEY"
+                    );
+
+                    return;
                 }
+
+                /*
+                 * 1. Speech → Text
+                 */
+                String transcript =
+                        gptClient.transcribe(
+                                wavFile
+                        );
+
+                if (transcript == null ||
+                        transcript.trim().isEmpty()) {
+
+                    return;
+                }
+
+                updateOverlay(
+                        "SUBRIMA\n" +
+                                "Речь:\n" +
+                                transcript
+                );
+
+                /*
+                 * 2. Text → Russian
+                 */
+                String translation =
+                        gptClient.translate(
+                                transcript,
+                                "auto",
+                                "Russian"
+                        );
+
+                if (translation == null ||
+                        translation.trim().isEmpty()) {
+
+                    return;
+                }
+
+                /*
+                 * 3. Показываем перевод
+                 */
+                updateOverlay(
+                        "SUBRIMA\n● LIVE\n\n" +
+                                translation
+                );
+
+                /*
+                 * TTS подключим следующим этапом.
+                 */
 
             } catch (Exception e) {
 
                 e.printStackTrace();
+
+                String message =
+                        e.getMessage();
+
+                if (message == null ||
+                        message.trim().isEmpty()) {
+
+                    message =
+                            "Ошибка обработки";
+                }
+
+                if (message.length() > 120) {
+                    message =
+                            message.substring(
+                                    0,
+                                    120
+                            );
+                }
+
+                updateOverlay(
+                        "SUBRIMA\n" +
+                                "API ERROR\n" +
+                                message
+                );
+
+            } finally {
+
+                deleteFile(wavFile);
+
+                processing.set(false);
             }
         });
     }
 
-    private void showOverlay(String text) {
+    private void deleteFile(File file) {
+
+        try {
+
+            if (file != null &&
+                    file.exists()) {
+
+                file.delete();
+            }
+
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void updateOverlay(
+            String text) {
+
+        android.os.Handler handler =
+                new android.os.Handler(
+                        android.os.Looper.getMainLooper()
+                );
+
+        handler.post(() -> {
+
+            if (overlayText != null) {
+                overlayText.setText(text);
+            }
+        });
+    }
+
+    private void showOverlay(
+            String text) {
 
         if (Build.VERSION.SDK_INT >=
                 Build.VERSION_CODES.M) {
@@ -411,82 +630,126 @@ public class LiveTranslatorService extends Service {
             }
         }
 
-        try {
+        android.os.Handler handler =
+                new android.os.Handler(
+                        android.os.Looper.getMainLooper()
+                );
 
-            windowManager =
-                    (WindowManager)
-                            getSystemService(
-                                    WINDOW_SERVICE
-                            );
+        handler.post(() -> {
 
-            overlayText =
-                    new TextView(this);
+            try {
 
-            overlayText.setText(text);
-            overlayText.setTextColor(
-                    android.graphics.Color.WHITE
-            );
-            overlayText.setTextSize(16);
-            overlayText.setPadding(
-                    20, 12, 20, 12
-            );
-            overlayText.setBackgroundColor(
-                    0xCC000000
-            );
+                if (windowManager != null &&
+                        overlayText != null) {
 
-            int type;
+                    overlayText.setText(text);
 
-            if (Build.VERSION.SDK_INT >= 26) {
-                type =
-                        WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY;
-            } else {
-                type =
-                        WindowManager.LayoutParams.TYPE_PHONE;
+                    return;
+                }
+
+                windowManager =
+                        (WindowManager)
+                                getSystemService(
+                                        WINDOW_SERVICE
+                                );
+
+                if (windowManager == null) {
+                    return;
+                }
+
+                overlayText =
+                        new TextView(this);
+
+                overlayText.setText(text);
+
+                overlayText.setTextColor(
+                        android.graphics.Color.WHITE
+                );
+
+                overlayText.setTextSize(16);
+
+                overlayText.setPadding(
+                        20,
+                        12,
+                        20,
+                        12
+                );
+
+                overlayText.setBackgroundColor(
+                        0xCC000000
+                );
+
+                int type;
+
+                if (Build.VERSION.SDK_INT >= 26) {
+
+                    type =
+                            WindowManager.LayoutParams
+                                    .TYPE_APPLICATION_OVERLAY;
+
+                } else {
+
+                    type =
+                            WindowManager.LayoutParams
+                                    .TYPE_PHONE;
+                }
+
+                WindowManager.LayoutParams params =
+                        new WindowManager.LayoutParams(
+                                WindowManager.LayoutParams
+                                        .WRAP_CONTENT,
+                                WindowManager.LayoutParams
+                                        .WRAP_CONTENT,
+                                type,
+                                WindowManager.LayoutParams
+                                        .FLAG_NOT_FOCUSABLE |
+                                        WindowManager.LayoutParams
+                                                .FLAG_NOT_TOUCHABLE,
+                                PixelFormat.TRANSLUCENT
+                        );
+
+                params.gravity =
+                        Gravity.TOP |
+                                Gravity.CENTER_HORIZONTAL;
+
+                params.y = 120;
+
+                windowManager.addView(
+                        overlayText,
+                        params
+                );
+
+            } catch (Exception e) {
+
+                e.printStackTrace();
             }
-
-            WindowManager.LayoutParams params =
-                    new WindowManager.LayoutParams(
-                            WindowManager.LayoutParams.WRAP_CONTENT,
-                            WindowManager.LayoutParams.WRAP_CONTENT,
-                            type,
-                            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE |
-                                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
-                            PixelFormat.TRANSLUCENT
-                    );
-
-            params.gravity =
-                    Gravity.TOP |
-                            Gravity.CENTER_HORIZONTAL;
-
-            params.y = 120;
-
-            windowManager.addView(
-                    overlayText,
-                    params
-            );
-
-        } catch (Exception e) {
-
-            e.printStackTrace();
-        }
+        });
     }
 
     private void removeOverlay() {
 
-        try {
-
-            if (windowManager != null &&
-                    overlayText != null) {
-
-                windowManager.removeView(
-                        overlayText
+        android.os.Handler handler =
+                new android.os.Handler(
+                        android.os.Looper.getMainLooper()
                 );
 
-                overlayText = null;
-            }
+        handler.post(() -> {
 
-        } catch (Exception ignored) {
-        }
+            try {
+
+                if (windowManager != null &&
+                        overlayText != null) {
+
+                    windowManager.removeView(
+                            overlayText
+                    );
+
+                    overlayText = null;
+                }
+
+            } catch (Exception ignored) {
+            }
+        });
     }
 
     private Notification createNotification() {
@@ -502,7 +765,8 @@ public class LiveTranslatorService extends Service {
                         "Захват и перевод аудио"
                 )
                 .setSmallIcon(
-                        android.R.drawable.ic_media_play
+                        android.R.drawable
+                                .ic_media_play
                 )
                 .setOngoing(true)
                 .build();
@@ -517,7 +781,8 @@ public class LiveTranslatorService extends Service {
                     new NotificationChannel(
                             CHANNEL_ID,
                             "SUBRIMA Translator",
-                            NotificationManager.IMPORTANCE_LOW
+                            NotificationManager
+                                    .IMPORTANCE_LOW
                     );
 
             NotificationManager manager =
@@ -542,8 +807,10 @@ public class LiveTranslatorService extends Service {
         try {
 
             if (audioRecord != null) {
+
                 audioRecord.stop();
                 audioRecord.release();
+
                 audioRecord = null;
             }
 
@@ -553,6 +820,7 @@ public class LiveTranslatorService extends Service {
         try {
 
             if (mediaProjection != null) {
+
                 mediaProjection.stop();
                 mediaProjection = null;
             }
@@ -562,8 +830,12 @@ public class LiveTranslatorService extends Service {
 
         removeOverlay();
 
-        if (executor != null) {
-            executor.shutdownNow();
+        if (captureExecutor != null) {
+            captureExecutor.shutdownNow();
+        }
+
+        if (processingExecutor != null) {
+            processingExecutor.shutdownNow();
         }
 
         super.onDestroy();
