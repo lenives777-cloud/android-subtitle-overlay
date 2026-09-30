@@ -172,3 +172,137 @@ jobs:
       - name: Make Gradle executable
         run: |
           chmod +x ./SubtitlesAppSubrimaProject/gradlew
+
+          ls -la ./SubtitlesAppSubrimaProject/gradlew
+
+      # ---------------------------------------------------------
+      # 10. Настраиваем Gradle
+      # ---------------------------------------------------------
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v6
+        with:
+          cache-disabled: false
+
+      # ---------------------------------------------------------
+      # 11. Проверяем Gradle
+      # ---------------------------------------------------------
+      - name: Check Gradle
+        working-directory: ./SubtitlesAppSubrimaProject
+        run: |
+          ./gradlew --version
+
+      # ---------------------------------------------------------
+      # 12. Проверяем Android Gradle Plugin
+      # ---------------------------------------------------------
+      - name: Check Android environment
+        working-directory: ./SubtitlesAppSubrimaProject
+        run: |
+          echo "========================================"
+          echo "JAVA"
+          echo "========================================"
+
+          java -version
+
+          echo ""
+          echo "========================================"
+          echo "ANDROID"
+          echo "========================================"
+
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+
+          echo ""
+          echo "========================================"
+          echo "GRADLE"
+          echo "========================================"
+
+          ./gradlew --version
+
+      # ---------------------------------------------------------
+      # 13. Очистка проекта
+      # ---------------------------------------------------------
+      - name: Clean project
+        working-directory: ./SubtitlesAppSubrimaProject
+        run: |
+          ./gradlew clean \
+            --stacktrace \
+            --no-daemon \
+            --console=plain
+
+      # ---------------------------------------------------------
+      # 14. Сборка SUBRIMA DEBUG APK
+      # ---------------------------------------------------------
+      - name: Build SUBRIMA debug APK
+        working-directory: ./SubtitlesAppSubrimaProject
+        run: |
+          ./gradlew assembleDebug \
+            --stacktrace \
+            --no-daemon \
+            --console=plain
+
+      # ---------------------------------------------------------
+      # 15. Ищем APK
+      # ---------------------------------------------------------
+      - name: Find APK
+        run: |
+          echo "========================================"
+          echo "APK FILES"
+          echo "========================================"
+
+          find ./SubtitlesAppSubrimaProject \
+            -type f \
+            -name "*.apk" \
+            -print
+
+      # ---------------------------------------------------------
+      # 16. Проверяем, что APK действительно создан
+      # ---------------------------------------------------------
+      - name: Verify APK
+        run: |
+          APK="$(find ./SubtitlesAppSubrimaProject \
+            -type f \
+            -path "*/build/outputs/apk/debug/*.apk" \
+            | head -n 1)"
+
+          if [ -z "$APK" ]; then
+            echo "ERROR: SUBRIMA debug APK was not created"
+            exit 1
+          fi
+
+          echo "APK FOUND:"
+          echo "$APK"
+
+          ls -lh "$APK"
+
+      # ---------------------------------------------------------
+      # 17. Переименовываем APK
+      # ---------------------------------------------------------
+      - name: Prepare SUBRIMA-debug.apk
+        run: |
+          mkdir -p ./release
+
+          APK="$(find ./SubtitlesAppSubrimaProject \
+            -type f \
+            -path "*/build/outputs/apk/debug/*.apk" \
+            | head -n 1)"
+
+          test -n "$APK"
+
+          cp "$APK" ./release/SUBRIMA-debug.apk
+
+          echo "========================================"
+          echo "FINAL APK"
+          echo "========================================"
+
+          ls -lh ./release/SUBRIMA-debug.apk
+
+      # ---------------------------------------------------------
+      # 18. Загружаем APK как GitHub Artifact
+      # ---------------------------------------------------------
+      - name: Upload SUBRIMA-debug.apk
+        uses: actions/upload-artifact@v4
+        with:
+          name: SUBRIMA-debug
+          path: release/SUBRIMA-debug.apk
+          if-no-files-found: error
+          retention-days: 30
